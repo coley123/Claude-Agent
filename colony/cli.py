@@ -40,9 +40,9 @@ def main(argv=None) -> int:
     run_dir = args.runs / slug(goal.name)
 
     if args.cmd == "run":
-        from .backend import AnthropicBackend
+        from .backend import RouterBackend
 
-        sup = Supervisor(goal, AnthropicBackend(), args.runs, args.hub, args.seed_skills)
+        sup = Supervisor(goal, RouterBackend(), args.runs, args.hub, args.seed_skills)
         print(f"run dir: {sup.run_dir}\nhub: {args.hub}\n"
               f"stop with: python -m colony stop {args.goal}")
         reason = sup.run()

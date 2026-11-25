@@ -1,0 +1,32 @@
+# A Claude lead with local-model workers (v3).
+# Serve a model first, for example with vLLM:
+#   vllm serve Qwen/Qwen3-8B --served-model-name qwen3-8b \
+#     --enable-auto-tool-choice --tool-call-parser hermes
+# and set COLONY_LOCAL_URL if it is not http://localhost:8000/v1.
+[goal]
+name = "calc-mixed"
+description = """Fix every failing test in this small Python calculator library without
+changing the tests."""
+repo = "calc-demo"
+mode = "converge"
+verify_command = "python -m pytest -q"
+
+[[agents]]
+name = "lead"
+role = "lead"
+model = "claude-opus-5-5"
+effort = "high"
+
+[[agents]]
+name = "qw1"
+model = "local:qwen3-8b"
+skills = ["debug-failing-test"]
+
+[[agents]]
+name = "qw2"
+model = "local:qwen3-8b"
+skills = ["debug-failing-test"]
+
+[guardrails]
+budget_usd = 3.0
+max_hours = 1.0

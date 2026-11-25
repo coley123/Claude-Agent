@@ -85,3 +85,84 @@ class AnthropicBackend:
         if isinstance(content, list):
             return [self.to_jsonable(c) for c in content]
         return content.to_dict() if hasattr(content, "to_dict") else content
+
+
+class LocalBackend:
+    """An open-weight model behind an OpenAI-compatible chat completions server.
+
+    Works with vLLM (`vllm serve <model> --enable-auto-tool-choice --tool-call-parser ...`),
+    SGLang, llama.cpp's server and similar. Messages are converted with `chatformat`, the same
+    converter the training export uses, so the model sees the format it was trained on.
+    Local models have no list price, so they cost $0 against the budget; `max_hours` still
+    applies.
+    """
+
+    def __init__(self, base_url: str | None = None, api_key: str | None = None,
+                 timeout: float = 600.0, max_tokens: int = 8192):
+        import os
+
+        self.base_url = (base_url or os.environ.get("COLONY_LOCAL_URL")
+                         or "http://localhost:8000/v1").rstrip("/")
+        self.api_key = api_key or os.environ.get("COLONY_LOCAL_API_KEY", "")
+        self.timeout = timeout
+        self.max_tokens = max_tokens
+
+    def create(self, *, model, effort, system, tools, messages) -> ModelTurn:
+        import json
+        import urllib.request
+
+        from .chatformat import from_chat_choice, to_chat, tools_to_chat
+
+        body = {"model": model, "messages": to_chat(system, messages),
+                "tools": tools_to_chat(tools), "max_tokens": self.max_tokens}
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions", data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json",
+                     **({"Authorization": f"Bearer {self.api_key}"} if self.api_key else {})})
+        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            data = json.loads(r.read())
+        choice = data["choices"][0]
+        blocks, calls = from_chat_choice(choice["message"])
+        finish = choice.get("finish_reason")
+        stop = {"tool_calls": "tool_use", "length": "max_tokens"}.get(finish, "end_turn")
+        if calls and stop == "end_turn":
+            stop = "tool_use"
+        usage = data.get("usage") or {}
+        return ModelTurn(
+            content=blocks, stop_reason=stop,
+            tool_calls=[ToolCall(i, n, a) for i, n, a in calls],
+            text="\n".join(b["text"] for b in blocks if b["type"] == "text"),
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0), model=model)
+
+    def to_jsonable(self, content):
+        return content
+
+
+class RouterBackend:
+    """Routes each agent to a backend by its model name.
+
+    `model = "local:<served-model-name>"` goes to the local server; anything else goes to
+    Claude. This lets one team mix a Claude lead with local-model workers. The Claude client
+    is created only if an agent actually uses Claude, so all-local teams need no API key.
+    """
+
+    def __init__(self, anthropic=None, local=None):
+        self._anthropic = anthropic
+        self.local = local or LocalBackend()
+
+    @property
+    def anthropic(self):
+        if self._anthropic is None:
+            self._anthropic = AnthropicBackend()
+        return self._anthropic
+
+    def create(self, *, model, **kw) -> ModelTurn:
+        if model.startswith("local:"):
+            return self.local.create(model=model.removeprefix("local:"), **kw)
+        return self.anthropic.create(model=model, **kw)
+
+    def to_jsonable(self, content):
+        if isinstance(content, list) and content and not isinstance(content[0], dict):
+            return self.anthropic.to_jsonable(content)
+        return content
