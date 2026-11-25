@@ -8,8 +8,11 @@ the goal is done.
 Agents also grow a shared **skill hub**: they write reusable skills and lessons, which are
 verified, reviewed, ranked by real outcomes and shared with every later run.
 
-Status: v1 (the harness) and v2 (the skill hub) are built. v3 fine-tunes a small model on
-the episodes this harness records. See [Roadmap](#roadmap).
+Agents can run on Claude or on your own model served locally, and the episodes they
+record become training data for that model, gated by a benchmark.
+
+Status: v1 (harness), v2 (skill hub) and v3 (own model) are built. Each has a step-by-step
+testing guide in [`docs/`](docs/). See [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -203,13 +206,29 @@ Models and list prices (USD per million input/output tokens) used for the budget
 Refusal fallbacks are on: if a model declines a request, the API retries it on a fallback
 model within the same call. Remove `fallbacks` in `colony/backend.py` to turn this off.
 
-## Data for later training
+## Your own model (v3)
 
-- `runs/<goal>/transcripts/` holds the full conversation of every agent session.
-- `python -m colony export <goal file>` writes the event log as `episodes.jsonl`.
+- **Local agents:** `model = "local:<served-name>"` sends an agent to an OpenAI-compatible
+  server (`COLONY_LOCAL_URL`, default `http://localhost:8000/v1`). Mix them with Claude
+  agents in one team (`examples/mixed-team.toml`).
+- **Benchmark and gate:**
 
-These are the raw material for v2's skill hub and v3's fine-tuning. Check your model
-provider's terms before you use its outputs to train another model.
+```bash
+python -m colony bench run --team examples/team-claude.toml --out results/baseline.json
+```
+
+```bash
+python -m colony bench compare results/baseline.json results/candidate.json
+```
+
+- **Data:** `python -m colony train-export` writes successful sessions as chat-format JSONL;
+  `python -m colony train-rollouts` collects K scored attempts per task for RL.
+- **Training:** `train/sft.py` (LoRA, assistant-only loss) and `train/grpo.py` (policy
+  gradient with group advantages and a KL penalty). See `docs/v3-testing.md`.
+
+Raw records: `runs/<goal>/transcripts/` holds every session; `python -m colony export <goal
+file>` writes the event log. Check your model provider's terms before you use its outputs
+to train another model.
 
 ## Layout
 
@@ -220,11 +239,17 @@ colony/
   backend.py     model backends (Claude now; add a local model here for v3)
   workspace.py   git worktrees, path confinement, command guard
   hub.py         skill hub: proposals, scan, tests, reviewer, ranking, lessons, search
+  chatformat.py  harness messages <-> chat-completions format (serving and training)
+  bench.py       benchmark tasks, team files, runs, regression gate
+  training/      metrics and reward, SFT export, rollouts, loss masking
   tools.py       the 23 tools agents can call
   agent.py       system prompt, sessions, stall detection, transcripts
   supervisor.py  threads, verification, integration, waiting, stop conditions, report
   cli.py         run / status / stop / export
 skills/          starter skills that seed a new hub
+benchmarks/      benchmark tasks (task.toml + starting repo)
+train/           GPU training scripts: sft.py, grpo.py
+docs/            testing guide for each version
 examples/        demo project template and two goal files
 tests/           harness tests with a scripted model
 ```
@@ -234,5 +259,5 @@ tests/           harness tests with a scripted model
 - **v2: skill hub (done).** Agents propose skills and lessons. Proposals are scanned,
   tested and reviewed, then ranked by real outcomes, revised and retired.
   Next steps here: embedding search, a held-out benchmark that gates publishing.
-- **v3: own model.** Fine-tune a small model on successful episodes (SFT), then multi-turn
-  RL with verifier rewards. A regression benchmark gates every new skill set and model.
+- **v3: own model (done).** Local-model agents, benchmark and gate, SFT export and
+  training, rollouts and a GRPO-style update.
