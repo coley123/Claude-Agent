@@ -1,0 +1,28 @@
+# Self-improvement loop (v4). Start with:  python -m colony serve examples/loop.toml
+# Drop goal files (same format as examples/converge.toml) into loop/queue/.
+# Relative paths below are relative to this file.
+
+[loop]
+root = "../loop"                # queue/, running/, done/, failed/, state.json, loop.log
+hub = "../hub"
+runs = "../runs"
+data_dir = "../data"
+bench_dir = "../benchmarks"
+poll_seconds = 30
+export_every = 5                # export training data after every 5 finished goals
+daily_budget_usd = 50.0         # stop starting new goals once today's spend reaches this
+pause_after_failures = 3        # write loop/PAUSED after 3 failed goals in a row
+
+[train]
+enabled = false                 # turn on once you have a GPU setup (see docs/v4-testing.md)
+min_new_sessions = 50           # train only when this many new successful sessions exist
+# Commands run from the project root. Placeholders: {data} {out} {cycle}
+command = "python train/sft.py --model Qwen/Qwen3-8B --data {data} --out {out}"
+deploy_command = "scripts/deploy_candidate.sh {out}"
+promote_command = "scripts/promote_candidate.sh {out}"
+rollback_command = "scripts/rollback_candidate.sh"
+team = "examples/team-local.toml"
+baseline = "results/baseline-local.json"
+repeats = 2
+max_success_drop = 0.0
+max_cost_increase = 0.25

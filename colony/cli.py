@@ -43,6 +43,11 @@ def main(argv=None) -> int:
     ro.add_argument("--tasks", default="")
     ro.add_argument("--bench-dir", type=Path, default=ROOT / "benchmarks")
     ro.add_argument("--out", type=Path, default=ROOT / "data" / "rollouts.jsonl")
+    sv = sub.add_parser("serve", help="run the self-improvement loop on a goal queue (v4)")
+    sv.add_argument("config", type=Path)
+    sv.add_argument("--once", action="store_true", help="process at most one goal, then exit")
+    ls = sub.add_parser("loop-status", help="show the self-improvement loop's state")
+    ls.add_argument("config", type=Path)
     b = sub.add_parser("bench", help="run or compare the benchmark suite")
     bsub = b.add_subparsers(dest="bench_cmd", required=True)
     br = bsub.add_parser("run", help="run a team on the benchmark tasks")
@@ -58,6 +63,21 @@ def main(argv=None) -> int:
     bc.add_argument("--max-cost-increase", type=float, default=0.25)
     args = ap.parse_args(argv)
 
+    if args.cmd in ("serve", "loop-status"):
+        from .backend import RouterBackend
+        from .loop import Loop, load_loop_config
+
+        cfg = load_loop_config(args.config, ROOT)
+        if args.cmd == "loop-status":
+            state = cfg.root / "state.json"
+            print(state.read_text() if state.exists() else "loop has not run yet")
+            for flag in ("PAUSED", "STOP"):
+                if (cfg.root / flag).exists():
+                    print(f"{flag}: {(cfg.root / flag).read_text().strip() or 'set'}")
+            print(f"queued goals: {len(list((cfg.root / 'queue').glob('*.toml')))}")
+            return 0
+        Loop(cfg, RouterBackend, ROOT, ROOT / "skills").serve(once=args.once)
+        return 0
     if args.cmd == "bench":
         return bench_cmd(args)
     if args.cmd == "train-rollouts":

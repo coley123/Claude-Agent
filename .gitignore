@@ -5,3 +5,7 @@ runs/
 examples/calc-demo/
 .venv/
 hub/
+loop/
+data/
+results/
+checkpoints/
