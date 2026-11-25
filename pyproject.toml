@@ -1,0 +1,18 @@
+[project]
+name = "colony"
+version = "0.1.0"
+description = "A persistent multi-agent coding team with private memory, messaging and skills"
+requires-python = ">=3.11"
+dependencies = ["anthropic>=2.14"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+colony = "colony.cli:main"
+
+[tool.setuptools]
+packages = ["colony"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

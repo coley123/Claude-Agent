@@ -1,0 +1,22 @@
+# Diverge: every agent tries its own approach; the first verified one wins.
+[goal]
+name = "calc-diverge"
+description = """Fix every failing test in this small Python calculator library without
+changing the tests."""
+repo = "calc-demo"
+mode = "diverge"
+verify_command = "python -m pytest -q"
+
+[[agents]]
+name = "ada"
+model = "claude-opus-5-5"
+skills = ["debug-failing-test"]
+
+[[agents]]
+name = "brook"
+model = "claude-sonnet-5-5"
+skills = ["test-first-change"]
+
+[guardrails]
+budget_usd = 5.0
+max_hours = 1.0
