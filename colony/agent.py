@@ -314,6 +314,7 @@ class Agent:
                 f"{self.spec.name}-{self.session:04d}-{label}.json")
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {"agent": self.spec.name, "session": self.session, "kind": label,
+                "model": self.spec.model,
                 "system": self.system,
                 "messages": [{"role": m["role"],
                               "content": self.sup.backend.to_jsonable(m["content"])}

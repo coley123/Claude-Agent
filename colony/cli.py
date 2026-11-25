@@ -31,10 +31,23 @@ def main(argv=None) -> int:
         p.add_argument("goal", type=Path)
     h = sub.add_parser("hub", help="inspect the skill hub")
     h.add_argument("what", choices=["skills", "lessons", "log"])
+    tr = sub.add_parser("train-export", help="export all runs as an SFT dataset (JSONL)")
+    tr.add_argument("--out", type=Path, default=ROOT / "data" / "sft.jsonl")
+    tr.add_argument("--all", action="store_true",
+                    help="include unsuccessful sessions (labelled in meta.success)")
+    tr.add_argument("--no-reflection", action="store_true")
     args = ap.parse_args(argv)
 
     if args.cmd == "hub":
         return hub_cmd(SkillHub(args.hub, seed=ROOT / "skills"), args.what)
+    if args.cmd == "train-export":
+        from .training.export import TERMS_NOTE, export_runs
+
+        summary = export_runs(args.runs, args.out, only_success=not args.all,
+                              include_reflection=not args.no_reflection)
+        print(json.dumps(summary, indent=1))
+        print(TERMS_NOTE)
+        return 0
 
     goal = load_goal(args.goal)
     run_dir = args.runs / slug(goal.name)
