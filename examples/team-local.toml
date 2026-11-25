@@ -1,0 +1,7 @@
+# Benchmark team: one local model per task (use to gate a fine-tuned candidate).
+# Serve the candidate under this name, e.g. vllm serve ./checkpoints/sft --served-model-name candidate
+name = "local-candidate"
+
+[[agents]]
+name = "solo"
+model = "local:candidate"

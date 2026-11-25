@@ -1,0 +1,10 @@
+# Benchmark team: one Claude agent per task (use as the baseline).
+name = "claude-solo"
+
+[[agents]]
+name = "solo"
+model = "claude-opus-5-5"
+effort = "high"
+
+[guardrails]
+budget_usd = 2.0

@@ -1,0 +1,3 @@
+description = """Make all tests pass without changing them. Fix the stock bugs in
+Inventory and implement the missing `restock_report` method as the tests describe."""
+verify_command = "python -m pytest -q -p no:cacheprovider"

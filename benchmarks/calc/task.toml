@@ -1,0 +1,3 @@
+description = """Fix every failing test in this small Python calculator library without
+changing the tests."""
+verify_command = "python -m pytest -q -p no:cacheprovider"

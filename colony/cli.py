@@ -36,8 +36,23 @@ def main(argv=None) -> int:
     tr.add_argument("--all", action="store_true",
                     help="include unsuccessful sessions (labelled in meta.success)")
     tr.add_argument("--no-reflection", action="store_true")
+    b = sub.add_parser("bench", help="run or compare the benchmark suite")
+    bsub = b.add_subparsers(dest="bench_cmd", required=True)
+    br = bsub.add_parser("run", help="run a team on the benchmark tasks")
+    br.add_argument("--team", type=Path, required=True)
+    br.add_argument("--tasks", default="", help="comma-separated task names (default: all)")
+    br.add_argument("--repeats", type=int, default=1)
+    br.add_argument("--bench-dir", type=Path, default=ROOT / "benchmarks")
+    br.add_argument("--out", type=Path, required=True)
+    bc = bsub.add_parser("compare", help="gate a candidate against a baseline")
+    bc.add_argument("baseline", type=Path)
+    bc.add_argument("candidate", type=Path)
+    bc.add_argument("--max-success-drop", type=float, default=0.0)
+    bc.add_argument("--max-cost-increase", type=float, default=0.25)
     args = ap.parse_args(argv)
 
+    if args.cmd == "bench":
+        return bench_cmd(args)
     if args.cmd == "hub":
         return hub_cmd(SkillHub(args.hub, seed=ROOT / "skills"), args.what)
     if args.cmd == "train-export":
@@ -102,4 +117,26 @@ def hub_cmd(hub: SkillHub, what: str) -> int:
         for e in hub.log():
             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(e["ts"]))
             print(f"{ts} {e['event']:<16} {e['name']:<24} {e['author']}: {e['detail'][:150]}")
+    return 0
+
+
+def bench_cmd(args) -> int:
+    from . import bench
+
+    if args.bench_cmd == "compare":
+        ok, lines = bench.compare(json.loads(args.baseline.read_text()),
+                                  json.loads(args.candidate.read_text()),
+                                  args.max_success_drop, args.max_cost_increase)
+        print("\n".join(lines))
+        print("GATE PASSED" if ok else "GATE FAILED")
+        return 0 if ok else 1
+    from .backend import RouterBackend
+
+    tasks = bench.load_tasks(args.bench_dir, [t for t in args.tasks.split(",") if t] or None)
+    team = bench.load_team(args.team)
+    results = bench.run_bench(tasks, team, RouterBackend(), args.hub, ROOT / "skills",
+                              args.repeats)
+    bench.save(results, args.out)
+    print(json.dumps(results["summary"], indent=1))
+    print(f"saved {args.out}")
     return 0

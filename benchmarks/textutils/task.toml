@@ -1,0 +1,4 @@
+description = """Make all tests pass without changing them. slugify must lowercase, drop
+punctuation and join words with single dashes; word_count must ignore case and punctuation;
+truncate must never return more than `limit` characters including the ellipsis."""
+verify_command = "python -m pytest -q -p no:cacheprovider"
