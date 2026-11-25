@@ -36,6 +36,13 @@ def main(argv=None) -> int:
     tr.add_argument("--all", action="store_true",
                     help="include unsuccessful sessions (labelled in meta.success)")
     tr.add_argument("--no-reflection", action="store_true")
+    ro = sub.add_parser("train-rollouts",
+                        help="collect K scored attempts per benchmark task for RL (GRPO)")
+    ro.add_argument("--team", type=Path, required=True)
+    ro.add_argument("--k", type=int, default=4)
+    ro.add_argument("--tasks", default="")
+    ro.add_argument("--bench-dir", type=Path, default=ROOT / "benchmarks")
+    ro.add_argument("--out", type=Path, default=ROOT / "data" / "rollouts.jsonl")
     b = sub.add_parser("bench", help="run or compare the benchmark suite")
     bsub = b.add_subparsers(dest="bench_cmd", required=True)
     br = bsub.add_parser("run", help="run a team on the benchmark tasks")
@@ -53,6 +60,16 @@ def main(argv=None) -> int:
 
     if args.cmd == "bench":
         return bench_cmd(args)
+    if args.cmd == "train-rollouts":
+        from . import bench
+        from .backend import RouterBackend
+        from .training.rollouts import collect
+
+        tasks = bench.load_tasks(args.bench_dir, [t for t in args.tasks.split(",") if t] or None)
+        summary = collect(tasks, bench.load_team(args.team), RouterBackend(), args.hub,
+                          args.out, args.k, ROOT / "skills")
+        print(json.dumps(summary, indent=1))
+        return 0
     if args.cmd == "hub":
         return hub_cmd(SkillHub(args.hub, seed=ROOT / "skills"), args.what)
     if args.cmd == "train-export":

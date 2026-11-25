@@ -79,3 +79,31 @@ def test_reward_and_advantages():
     adv = group_advantages([reward(win), reward(slow), reward(lose)])
     assert adv[0] > adv[1] > adv[2] and abs(sum(adv)) < 1e-9
     assert group_advantages([0.5, 0.5]) == [0.0, 0.0]
+
+
+class CharTokenizer:
+    """Stand-in for a Hugging Face tokenizer: renders <role>content</role>, one id per char."""
+
+    def apply_chat_template(self, messages, tools=None, tokenize=True,
+                            add_generation_prompt=False):
+        text = "".join(f"<{m['role']}>{m.get('content') or ''}</{m['role']}>" for m in messages)
+        if add_generation_prompt:
+            text += "<assistant>"
+        return [ord(c) for c in text]
+
+
+def test_masking_trains_only_assistant_tokens():
+    from colony.training.masking import IGNORE, tokenize_with_mask
+
+    msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "do it"},
+            {"role": "assistant", "content": "ok"}, {"role": "tool", "content": "out"},
+            {"role": "assistant", "content": "done"}]
+    ids, labels, n = tokenize_with_mask(CharTokenizer(), msgs, None, 10_000)
+    trained = "".join(chr(l) for l in labels if l != IGNORE)
+    assert trained == "ok</assistant>done</assistant>"
+    assert n == len(trained)
+    assert tokenize_with_mask(CharTokenizer(), msgs[:2], None, 10_000) is None
+    # truncation keeps what fits; a limit that cuts off every reply leaves nothing to train
+    ids, labels, n = tokenize_with_mask(CharTokenizer(), msgs, None, 60)
+    assert len(ids) == 60 and 0 < n == sum(1 for l in labels if l != IGNORE)
+    assert tokenize_with_mask(CharTokenizer(), msgs, None, 40) is None

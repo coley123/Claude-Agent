@@ -45,3 +45,34 @@ def test_bench_run_and_gate(tmp_path):
     bench.save(bad, cand)
     assert main(["bench", "compare", str(base), str(base)]) == 0
     assert main(["bench", "compare", str(base), str(cand)]) == 1
+
+
+class Alternating(ScriptedBackend):
+    """Fixes the task on even attempts, gives up on odd ones: a group with spread."""
+
+    def __init__(self):
+        super().__init__({})
+        self.attempt = -1
+
+    def create(self, *, model, effort, system, tools, messages):
+        if len(messages) == 1:  # first turn of an attempt's session
+            self.attempt += 1
+            self.scripts["solo"] = ([FIX, [("submit", {"task_id": 0, "summary": "fixed"})]]
+                                    if self.attempt % 2 == 0 else
+                                    [[("submit", {"task_id": 0, "summary": "nothing"})]])
+        return super().create(model=model, effort=effort, system=system, tools=tools,
+                              messages=messages)
+
+
+def test_rollouts_carry_group_advantages(tmp_path):
+    from colony.training.rollouts import collect
+
+    team = bench.load_team(ROOT / "examples" / "team-claude.toml")
+    team.guardrails["max_hours"] = 0.002
+    out = tmp_path / "rollouts.jsonl"
+    summary = collect(bench.load_tasks(ROOT / "benchmarks", ["calc"]), team, Alternating(),
+                      tmp_path / "hub", out, k=2, seed_skills=ROOT / "skills")
+    rows = [json.loads(l) for l in out.read_text().splitlines()]
+    assert summary["groups"][0]["rewards"][0] > summary["groups"][0]["rewards"][1]
+    assert {r["advantage"] > 0 for r in rows} == {True, False}
+    assert all(r["messages"][0]["role"] == "system" for r in rows)
