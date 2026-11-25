@@ -11,8 +11,12 @@ verified, reviewed, ranked by real outcomes and shared with every later run.
 Agents can run on Claude or on your own model served locally, and the episodes they
 record become training data for that model, gated by a benchmark.
 
-Status: v1 (harness), v2 (skill hub) and v3 (own model) are built. Each has a step-by-step
-testing guide in [`docs/`](docs/). See [Roadmap](#roadmap).
+A long-running loop (`colony serve`) works through a queue of goals, grows the hub, and
+retrains and promotes the model when a candidate passes the benchmark.
+
+Status: v1 (harness), v2 (skill hub), v3 (own model) and v4 (self-improvement loop) are
+built and covered by offline tests. None has been run against a real model yet: follow the
+step-by-step testing guides in [`docs/`](docs/README.md), in order.
 
 ## Quick start
 
@@ -226,6 +230,23 @@ python -m colony bench compare results/baseline.json results/candidate.json
 - **Training:** `train/sft.py` (LoRA, assistant-only loss) and `train/grpo.py` (policy
   gradient with group advantages and a KL penalty). See `docs/v3-testing.md`.
 
+## The self-improvement loop (v4)
+
+```bash
+python -m colony serve examples/loop.toml
+```
+
+Drop goal files into `loop/queue/`. The loop runs them one at a time on the shared hub,
+files them under `loop/done/` or `loop/failed/`, and exports training data every few goals.
+With `[train] enabled = true` it also trains a candidate (your command), deploys it,
+benchmarks it, and promotes it only if it passes the gate; otherwise it rolls it back.
+Guardrails: `daily_budget_usd`, a pause after repeated failures (`loop/PAUSED`), a stop
+file (`loop/STOP`), and every decision in `loop/loop.log`. Check it with:
+
+```bash
+python -m colony loop-status examples/loop.toml
+```
+
 Raw records: `runs/<goal>/transcripts/` holds every session; `python -m colony export <goal
 file>` writes the event log. Check your model provider's terms before you use its outputs
 to train another model.
@@ -242,6 +263,7 @@ colony/
   chatformat.py  harness messages <-> chat-completions format (serving and training)
   bench.py       benchmark tasks, team files, runs, regression gate
   training/      metrics and reward, SFT export, rollouts, loss masking
+  loop.py        self-improvement loop: queue, export, train, gate, promote
   tools.py       the 23 tools agents can call
   agent.py       system prompt, sessions, stall detection, transcripts
   supervisor.py  threads, verification, integration, waiting, stop conditions, report
@@ -249,7 +271,8 @@ colony/
 skills/          starter skills that seed a new hub
 benchmarks/      benchmark tasks (task.toml + starting repo)
 train/           GPU training scripts: sft.py, grpo.py
-docs/            testing guide for each version
+docs/            testing guide for each version (start at docs/README.md)
+scripts/         deploy / promote / rollback hook templates for the loop
 examples/        demo project template and two goal files
 tests/           harness tests with a scripted model
 ```
@@ -261,3 +284,8 @@ tests/           harness tests with a scripted model
   Next steps here: embedding search, a held-out benchmark that gates publishing.
 - **v3: own model (done).** Local-model agents, benchmark and gate, SFT export and
   training, rollouts and a GRPO-style update.
+- **v4: self-improvement loop (done).** Goal queue, periodic export, gated
+  train-deploy-promote cycles, budget and failure guardrails.
+- **Next ideas:** agents that queue their own follow-up goals; embedding search in the hub;
+  a benchmark gate on skill publishing; training in parallel with goal work; gradual
+  rollout of promoted models.
