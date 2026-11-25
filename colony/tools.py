@@ -10,10 +10,10 @@ if TYPE_CHECKING:
     from .agent import Agent
 
 
-def _tool(tool_name: str, description: str, **props) -> dict:
+def _tool(tool_name: str, tool_description: str, /, **props) -> dict:
     return {
         "name": tool_name,
-        "description": description,
+        "description": tool_description,
         "strict": True,
         "input_schema": {
             "type": "object",
@@ -57,8 +57,24 @@ TOOLS = [
           task_id=I, reason=S),
     _tool("sync_workspace", "Merge the team's integrated work into your workspace. Do this "
           "before starting a new task."),
-    _tool("list_skills", "List the skill library."),
-    _tool("load_skill", "Load a skill's full instructions.", name=S),
+    _tool("list_skills", "List the skill hub, best-scoring skills first."),
+    _tool("load_skill", "Load a skill's full instructions. Loading counts as using it: the "
+          "skill is credited with the outcome of your next submission.", name=S),
+    _tool("search_hub", "Keyword search across the skill hub and lessons other agents "
+          "recorded in earlier runs. Search before solving a problem from scratch and before "
+          "proposing a skill.", query=S),
+    _tool("record_lesson", "Record a short lesson in the shared hub for future agents: "
+          "something that works, or a dead end to avoid. Be specific and general enough to "
+          "help on other projects.", topic=S,
+          kind={"type": "string", "enum": ["works", "fails", "tip"]}, lesson=S),
+    _tool("propose_skill", "Propose a reusable skill (new, or an improved version of an "
+          "existing one with the same name). It is safety-scanned, its test_command is run "
+          "in a clean copy of the skill folder (use \"\" if it has no scripts to test), and a "
+          "reviewer must approve it before it is published to all agents.",
+          name=S, description=S, instructions=S, test_command=S,
+          files={"type": "array", "items": {
+              "type": "object", "properties": {"path": S, "content": S},
+              "required": ["path", "content"], "additionalProperties": False}}),
     _tool("submit", "Submit work for verification. Your changes are committed automatically. "
           "Converge mode: pass the task_id. Diverge mode: pass 0 to submit your approach for "
           "the whole goal. Only a passing verifier marks work done.", task_id=I, summary=S),
@@ -142,22 +158,35 @@ def _dispatch(agent: "Agent", name: str, a: dict) -> str:
         if not store.claim_task(a["task_id"], me):
             raise ValueError("task is not open (already claimed, done, or missing)")
         t = store.task(a["task_id"])
-        loaded = "".join(f"\n\n{sup.skills.load(s)}" for s in t["skills"]
-                         if s in sup.skills.all())
+        available = [s for s in t["skills"] if s in sup.hub.all()]
+        for s in available:
+            agent.use_skill(s)
+        loaded = "".join(f"\n\n{sup.hub.load(s)}" for s in available)
         return f"claimed #{t['id']}: {t['title']}\n\n{t['detail']}{loaded}"
     if name == "release_task":
         t = store.task(a["task_id"])
         if not t or t["owner"] != me:
             raise ValueError("you do not own that task")
         store.update_task(a["task_id"], status="open", owner=None, result=a["reason"])
+        agent.credit_skills(False)
         return "released"
     if name == "sync_workspace":
         ok, msg = sup.ws.sync_from_integration(me)
         return msg
     if name == "list_skills":
-        return sup.skills.index()
+        return sup.hub.index()
     if name == "load_skill":
-        return sup.skills.load(a["name"])
+        text = sup.hub.load(a["name"])
+        agent.use_skill(a["name"])
+        return text
+    if name == "search_hub":
+        return sup.hub.search(a["query"])
+    if name == "record_lesson":
+        lid = sup.hub.add_lesson(a["topic"], a["kind"], a["lesson"], me, sup.run_id)
+        return f"lesson #{lid} recorded"
+    if name == "propose_skill":
+        ok, msg = sup.propose_skill(agent, a)
+        return msg
     if name == "submit":
         return sup.submit(agent, a["task_id"], a["summary"])
     if name == "report_blocked":

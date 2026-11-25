@@ -5,8 +5,11 @@ inbox. Agents talk over a message bus, coordinate on a shared blackboard, decide
 help each other, load skills when a task needs them, and keep going until a verifier says
 the goal is done.
 
-This is **v1**: the harness. v2 adds agents that write skills into a shared hub; v3
-fine-tunes a small model on the episodes this harness records. See [Roadmap](#roadmap).
+Agents also grow a shared **skill hub**: they write reusable skills and lessons, which are
+verified, reviewed, ranked by real outcomes and shared with every later run.
+
+Status: v1 (the harness) and v2 (the skill hub) are built. v3 fine-tunes a small model on
+the episodes this harness records. See [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -84,9 +87,63 @@ python -m pytest -q
 **Helping**: each agent has a `cooperation` weight (0 = own objective only, 1 = team first)
 that tells it how to weigh `request_help` messages against its own work.
 
-**Fluid skills**: skills are folders in `skills/` with a `SKILL.md`. Agents see a one-line
-index and `load_skill` on demand. A task can name skills, and claiming the task loads them.
-Starter skills: `repo-orientation`, `debug-failing-test`, `test-first-change`, `ask-for-help`.
+**Fluid skills**: skills are folders with a `SKILL.md`. Agents see a one-line index and
+`load_skill` on demand. A task can name skills, and claiming the task loads them. Starter
+skills in `skills/` seed an empty hub: `repo-orientation`, `debug-failing-test`,
+`test-first-change`, `ask-for-help`.
+
+## The skill hub
+
+The hub (default `hub/`, set with `--hub`) outlives runs. Point several colonies at the same
+hub and they all learn from each other.
+
+```
+hub/
+  skills/<name>/      published skills: SKILL.md, scripts, tests, meta.json (version, author)
+  drafts/             every proposal, kept for audit
+  archive/<name>/     earlier versions and retired skills
+  hub.db              usage stats, outcomes, lessons, pipeline log
+```
+
+**Growing it.** Agents call `propose_skill` whenever they find something reusable. After a
+run ends with the goal verified (or the time limit), each agent gets a reflection session
+limited to read-only and hub tools: it reviews its notes and actions, then proposes skills,
+improves skills that misled it, and records lessons. `reflection_budget_usd` caps that spend.
+
+**Publishing pipeline.** A proposal is published only if it passes all three:
+1. a safety and format scan: name, size and path rules, plus the same command denylist the
+   agents run under;
+2. its own `test_command`, run in a clean temporary copy of the skill folder;
+3. a reviewer model (`reviewer_model`) that rejects one-off notes, unsafe or test-weakening
+   advice, duplicates, and revisions that aren't better than the current version.
+
+A proposal under an existing name is a revision: the old version moves to `archive/` and
+the new one starts with fresh stats.
+
+**Ranking.** Loading a skill (directly, by claiming a task that names it, or by preloading)
+credits it with that agent's next outcome: success when its work is accepted or verified,
+failure when it releases the task or the run ends unverified. The score is a smoothed
+success rate, `(successes + 1) / (outcomes + 2)`. The index lists skills best-first. After
+3 outcomes, a score below 0.4 flags the skill for revision. After 5 outcomes, a score below
+0.2 retires it to `archive/`.
+
+**Lessons.** `record_lesson` stores short "works / fails / tip" notes. Every session's
+briefing includes the lessons most relevant to the goal, and `search_hub` searches skills
+and lessons together. Search is keyword-based for now.
+
+Inspect the hub:
+
+```bash
+python -m colony hub skills
+```
+
+```bash
+python -m colony hub lessons
+```
+
+```bash
+python -m colony hub log
+```
 
 ## Guardrails
 
@@ -105,7 +162,7 @@ docker build -t colony .
 ```
 
 ```bash
-docker run --rm -it -e ANTHROPIC_API_KEY -v "$PWD/runs:/app/runs" colony run examples/converge.toml
+docker run --rm -it -e ANTHROPIC_API_KEY -v "$PWD/runs:/app/runs" -v "$PWD/hub:/app/hub" colony run examples/converge.toml
 ```
 
 ## Goal file
@@ -135,6 +192,10 @@ stall_repeat_limit = 3
 extra_deny = ['\bnpm\s+publish\b']
 ```
 
+Skill hub settings go under `[goal]`: `reflect = true`, `reflection_turns = 12`,
+`reflection_budget_usd = 2.0`, `reviewer_model = "claude-opus-5-5"`,
+`reviewer_effort = "high"`.
+
 Models and list prices (USD per million input/output tokens) used for the budget estimate:
 `claude-opus-5-5` $4/$20, `claude-sonnet-5-5` $2/$10, `claude-haiku-5-5` $0.10/$0.50,
 `claude-fable-5-2` $8/$40. The budget is an estimate; check real spend in the Claude Console.
@@ -158,19 +219,20 @@ colony/
   store.py       SQLite state: tasks, messages, blackboard, notes, events, usage
   backend.py     model backends (Claude now; add a local model here for v3)
   workspace.py   git worktrees, path confinement, command guard
-  tools.py       the 20 tools agents can call
+  hub.py         skill hub: proposals, scan, tests, reviewer, ranking, lessons, search
+  tools.py       the 23 tools agents can call
   agent.py       system prompt, sessions, stall detection, transcripts
   supervisor.py  threads, verification, integration, waiting, stop conditions, report
   cli.py         run / status / stop / export
-skills/          starter skill library
+skills/          starter skills that seed a new hub
 examples/        demo project template and two goal files
 tests/           harness tests with a scripted model
 ```
 
 ## Roadmap
 
-- **v2: skill hub.** After verified work, agents write reusable skills (with tests) into
-  the library; skills are verified in a clean sandbox, reviewed, ranked by real outcomes,
-  and refined on failure. Episodes and failure notes become searchable for new agents.
+- **v2: skill hub (done).** Agents propose skills and lessons. Proposals are scanned,
+  tested and reviewed, then ranked by real outcomes, revised and retired.
+  Next steps here: embedding search, a held-out benchmark that gates publishing.
 - **v3: own model.** Fine-tune a small model on successful episodes (SFT), then multi-turn
   RL with verifier rewards. A regression benchmark gates every new skill set and model.

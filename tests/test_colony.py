@@ -45,7 +45,8 @@ def repo(tmp_path):
 def make(repo, tmp_path, mode, agents, scripts, **kw):
     goal = Goal(name=f"test-{mode}", description="fix the tests", repo=repo, mode=mode,
                 verify_command="python -m pytest -q -p no:cacheprovider", agents=agents, **kw)
-    return Supervisor(goal, ScriptedBackend(scripts), tmp_path / "runs", ROOT / "skills")
+    return Supervisor(goal, ScriptedBackend(scripts), tmp_path / "runs", tmp_path / "hub",
+                      ROOT / "skills")
 
 
 def test_diverge_first_verified_approach_wins(repo, tmp_path):

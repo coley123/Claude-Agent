@@ -52,6 +52,12 @@ class Goal:
     command_timeout: int = 300
     stall_repeat_limit: int = 3
     deny_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_DENY))
+    # Skill hub (v2)
+    reflect: bool = True  # after the run, agents turn what they learned into skills/lessons
+    reflection_turns: int = 12
+    reflection_budget_usd: float = 2.0  # extra spend allowed for reflection after the run
+    reviewer_model: str = "claude-opus-5-5"
+    reviewer_effort: str = "high"
 
 
 def load_goal(path: str | Path) -> Goal:
@@ -75,6 +81,9 @@ def load_goal(path: str | Path) -> Goal:
         verify_command=g.get("verify_command", "python -m pytest -q"),
         verify_timeout=g.get("verify_timeout", 600),
         agents=agents,
+        **{k: g[k] for k in ("reflect", "reflection_turns", "reflection_budget_usd",
+                                  "reviewer_model", "reviewer_effort")
+           if k in g},
         **{k: v for k, v in guard.items() if k != "extra_deny"},
     )
     goal.deny_patterns += guard.get("extra_deny", [])

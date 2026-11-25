@@ -10,7 +10,7 @@ from pathlib import Path
 from .agent import Agent
 from .backend import Backend
 from .config import Goal
-from .skills import SkillLibrary
+from .hub import SkillHub, make_reviewer
 from .store import Store
 from .workspace import CommandGuard, Workspaces, run_command
 
@@ -24,14 +24,19 @@ def slug(text: str) -> str:
 
 
 class Supervisor:
-    def __init__(self, goal: Goal, backend: Backend, runs_root: Path, skills_root: Path):
+    def __init__(self, goal: Goal, backend: Backend, runs_root: Path, hub_root: Path,
+                 seed_skills: Path | None = None):
         self.goal = goal
         self.backend = backend
         self.run_id = slug(goal.name)
         self.run_dir = runs_root / self.run_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.store = Store(self.run_dir / "colony.db")
-        self.skills = SkillLibrary(skills_root)
+        self.hub = SkillHub(hub_root, seed=seed_skills, deny_patterns=goal.deny_patterns)
+        self.reviewer = make_reviewer(
+            backend, goal.reviewer_model, goal.reviewer_effort,
+            on_usage=lambda t: self.store.add_usage("reviewer", t.input_tokens,
+                                                    t.output_tokens, t.cost()))
         self.ws = Workspaces(goal.repo, self.run_dir, self.run_id)
         self.guard = CommandGuard(goal.deny_patterns)
         self.integration_lock = threading.Lock()
@@ -46,7 +51,7 @@ class Supervisor:
         self.ws.setup([a.name for a in self.goal.agents])
         self.store.log("supervisor", 0, "run_start", {"mode": self.goal.mode,
                                                       "agents": [a.name for a in self.goal.agents]})
-        agents = [Agent(self, spec) for spec in self.goal.agents]
+        agents = self.agents = [Agent(self, spec) for spec in self.goal.agents]
         threads = [threading.Thread(target=self._agent_loop, args=(a,), name=a.spec.name,
                                     daemon=True) for a in agents]
         for t in threads:
@@ -69,8 +74,50 @@ class Supervisor:
                 all_waiting_since = None
         for t in threads:
             t.join(timeout=5)
+        done = bool(self.store.get_meta("goal_done"))
+        for a in agents:
+            # Skills used without a verified result: a failure if the goal was not reached;
+            # no credit either way if a teammate's work won.
+            if not done:
+                a.credit_skills(False)
+            a.skills_used.clear()
+        if self.goal.reflect and (done or (self.stop_reason or "").startswith("time limit")):
+            self._reflect(agents)
         self.write_report()
         return self.stop_reason or "finished"
+
+    # ------------------------------------------------------------------ reflection
+    def reflection_should_stop(self) -> bool:
+        return ((self.run_dir / "STOP").exists() or self.store.total_cost()
+                >= self.goal.budget_usd + self.goal.reflection_budget_usd)
+
+    def _reflect(self, agents: list[Agent]) -> None:
+        outcome = self.stop_reason or "finished"
+        self.store.log("supervisor", 0, "reflection_start", {"outcome": outcome})
+
+        def go(a: Agent):
+            try:
+                a.reflect(outcome)
+            except Exception as e:
+                self.store.log(a.spec.name, a.session, "error", {"error": repr(e)})
+
+        threads = [threading.Thread(target=go, args=(a,), daemon=True) for a in agents]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    def propose_skill(self, agent: Agent, a: dict) -> tuple[bool, str]:
+        ok, msg = self.hub.propose(
+            name=a["name"], description=a["description"], instructions=a["instructions"],
+            test_command=a["test_command"], files=a["files"], author=agent.spec.name,
+            run=self.run_id, reviewer=self.reviewer)
+        self.store.log(agent.spec.name, agent.session, "skill_proposal",
+                       {"name": a["name"], "published": ok, "result": msg[:1000]})
+        if ok:
+            self.store.post(agent.spec.name, "finding", f"published skill {a['name']}: "
+                            f"{a['description']}")
+        return ok, msg
 
     def _agent_loop(self, agent: Agent) -> None:
         name, errors = agent.spec.name, 0
@@ -183,11 +230,13 @@ class Supervisor:
         if self.goal.mode == "diverge":
             if task_id:
                 self.store.update_task(task_id, status="done", result=summary)
+                agent.credit_skills(True)
                 return f"task #{task_id} accepted"
             code, out = run_command(self.goal.verify_command, ws, self.goal.verify_timeout)
             if code != 0:
                 self.store.log(me, agent.session, "verify_fail", {"task_id": 0})
                 return f"REJECTED: goal verifier failed on your approach:\n{out}"
+            agent.credit_skills(True)
             self._complete(self.ws.branch(me), me)
             return "VERIFIED: your approach passes the goal verifier. The goal is complete."
 
@@ -200,9 +249,11 @@ class Supervisor:
             if task_id:
                 self.store.update_task(task_id, status="done", result=summary)
                 self.store.post(me, "status", f"finished task #{task_id}: {summary}")
+                agent.credit_skills(True)
             code, out = run_command(self.goal.verify_command, self.ws.integration,
                                     self.goal.verify_timeout)
         if code == 0:
+            agent.credit_skills(True)
             self._complete(self.ws.integration_branch, me)
             return "VERIFIED: the integrated work passes the goal verifier. The goal is complete."
         self.store.log(me, agent.session, "goal_verify_fail", {"task_id": task_id})
@@ -240,6 +291,17 @@ class Supervisor:
             for t in self.store.tasks()] + ["", "## Usage", ""] + [
             f"- {u['agent']}: {u['input_tokens']} in / {u['output_tokens']} out, "
             f"${u['cost_usd']:.2f}" for u in self.store.usage()]
+        published = [e for e in self.store.events()
+                     if e["kind"] == "skill_proposal" and e["data"]["published"]]
+        rejected = [e for e in self.store.events()
+                    if e["kind"] == "skill_proposal" and not e["data"]["published"]]
+        lessons = [l for l in self.hub.lessons() if l["run"] == self.run_id]
+        lines += ["", "## Skill hub", "",
+                  f"- Skills published this run: "
+                  f"{', '.join(e['data']['name'] for e in published) or 'none'}",
+                  f"- Proposals rejected: {len(rejected)}",
+                  f"- Lessons recorded: {len(lessons)}",
+                  f"- Hub: `{self.hub.root}`"]
         esc = self.run_dir / "ESCALATIONS.md"
         if esc.exists():
             lines += ["", "## Needs a human", "", esc.read_text()]
