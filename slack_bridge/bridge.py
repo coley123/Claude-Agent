@@ -53,6 +53,10 @@ class Participant:
     timeout_s: int = 600
     daily_cap: int = 40
     min_interval_s: int = 15
+    watch: bool = True            # get catch-up digests of new activity
+    digest_minutes: int = 60      # at most one digest per this many minutes
+    digest_daily_cap: int = 12
+    watch_channels: list[str] = field(default_factory=list)  # empty = bridge default
     bot_token_env: str = ""
     app_token_env: str = ""
     persona: str = ""
@@ -80,6 +84,7 @@ class Config:
     context_messages: int
     project_brief: str
     knowledge_dir: Path
+    watch_channels: list[str]
     participants: list[Participant]
     externals: list[External]
 
@@ -122,6 +127,7 @@ def load_config(path: str | Path) -> Config:
         max_replies_per_hour=int(b.get("max_replies_per_hour", 40)),
         context_messages=int(b.get("context_messages", 40)),
         project_brief=brief.strip(),
+        watch_channels=list(b.get("watch_channels", b.get("allowed_channels", []))),
         knowledge_dir=rel("knowledge_dir", str(Path(str(b.get("data_dir", "bridge-data"))) / "knowledge")),
         participants=parts,
         externals=externals,
@@ -144,6 +150,9 @@ CREATE TABLE IF NOT EXISTS knowledge (
     id INTEGER PRIMARY KEY, kind TEXT, title TEXT, body TEXT, author TEXT,
     confidence TEXT, status TEXT, evidence TEXT, source TEXT, created REAL, updated REAL,
     revision INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS inbox (
+    id INTEGER PRIMARY KEY, agent TEXT, channel TEXT, ts TEXT, thread_ts TEXT, author TEXT,
+    is_bot INTEGER, text TEXT, created REAL, seen INTEGER DEFAULT 0, UNIQUE(agent, channel, ts));
 CREATE TABLE IF NOT EXISTS knowledge_log (
     id INTEGER PRIMARY KEY, entry INTEGER, action TEXT, actor TEXT, detail TEXT,
     snapshot TEXT, source TEXT, ts REAL);
@@ -342,12 +351,14 @@ class Ledger:
         return bool(self.get("pause:all") or self.get(f"pause:{agent}")
                     or (self.dir / "STOP").exists())
 
-    def runs_since(self, since: float, agent: str | None = None) -> int:
+    def runs_since(self, since: float, agent: str | None = None, kind: str | None = None) -> int:
         sql = "SELECT COUNT(*) n FROM runs WHERE started>=? AND status!='skipped'"
         args: tuple = (since,)
         if agent:
             sql += " AND agent=?"
             args += (agent,)
+        if kind == "digest":
+            sql += " AND trigger_ts='digest'"
         return self.q(sql, args)[0]["n"]
 
     def last_run(self, agent: str) -> float:
@@ -476,6 +487,7 @@ class Bridge:
             for key in self.parts:
                 self.queues[key] = queue.Queue()
                 threading.Thread(target=self._worker, args=(key,), daemon=True).start()
+            threading.Thread(target=self._scheduler, daemon=True).start()
 
     def log(self, msg: str):
         line = f"{dt.datetime.now():%Y-%m-%d %H:%M:%S} {msg}"
@@ -540,6 +552,7 @@ class Bridge:
                 if notes:
                     self._post(client, channel, event.get("thread_ts") or ts, "\n".join(notes))
         if not (is_dm or self.mentions(text, p.user_id)):
+            self._note_activity(key, event, client)
             return
         if not self.ledger.first_time(f"{channel}:{ts}:{key}"):
             return
@@ -592,7 +605,10 @@ class Bridge:
                 if wait > 0:
                     time.sleep(wait)
                 if self.ledger.paused(key):
-                    self.log(f"{key}: paused before run, dropped {job['channel']}/{job['ts']}")
+                    self.log(f"{key}: paused before run, dropped {job.get('channel', 'digest')}")
+                    continue
+                if job.get("kind") == "digest":
+                    self._do_digest(key, force=job.get("force", False))
                     continue
                 # re-read the thread: others may have replied while this waited
                 job["thread"] = self._thread(self.clients[key], job["channel"], job["thread_ts"], job["ts"])
@@ -649,7 +665,158 @@ class Bridge:
                            cost_usd=res.cost_usd, posted_ts=posted)
         self.log(f"{p.name}: run {run_id} ok in {time.time() - started:.0f}s")
 
-    def build_prompt(self, p: Participant, job: dict) -> str:
+    # update digests ------------------------------------------------------------
+    def _watched(self, p: Participant, channel: str) -> bool:
+        chans = p.watch_channels or self.cfg.watch_channels
+        return p.watch and (not chans or channel in chans)
+
+    def _note_activity(self, key: str, event: dict, client):
+        """Remember a message this participant wasn't mentioned in, for its next digest."""
+        p = self.parts[key]
+        channel = event.get("channel", "")
+        text = event.get("text", "")
+        if not self._watched(p, channel) or text.strip().lower().startswith("!im1"):
+            return
+        self.ledger.q("INSERT OR IGNORE INTO inbox (agent, channel, ts, thread_ts, author, is_bot, text, created)"
+                      " VALUES (?,?,?,?,?,?,?,?)",
+                      (key, channel, event.get("ts", ""), event.get("thread_ts") or event.get("ts", ""),
+                       self.author(event, client), int(self.is_bot_msg(event)), text, time.time()))
+
+    def _scheduler(self):
+        while True:
+            time.sleep(30)
+            try:
+                self.digest_tick()
+            except Exception as e:
+                self.log(f"scheduler error {e!r}")
+
+    def digest_tick(self, now: float | None = None):
+        """Queue a catch-up for every participant that has unseen activity and is due."""
+        now = now or time.time()
+        for key, p in self.parts.items():
+            if not p.watch or self.busy.get(key) or (key in self.queues and self.queues[key].qsize()):
+                continue
+            if now - float(self.ledger.get(f"digest:{key}", 0)) < p.digest_minutes * 60:
+                continue
+            if not self._pending(key):
+                continue
+            if self.sync:
+                self._do_digest(key, now=now)
+            else:
+                self.ledger.set(f"digest:{key}", now)  # claim the slot before queueing
+                self.queues[key].put({"kind": "digest"})
+
+    def _pending(self, key: str) -> tuple[list[dict], list[dict]]:
+        msgs = [dict(r) for r in self.ledger.q(
+            "SELECT * FROM inbox WHERE agent=? AND seen=0 ORDER BY CAST(ts AS REAL)", (key,))]
+        since = float(self.ledger.get(f"kbseen:{key}", 0))
+        name = self.parts[key].name
+        kb = [dict(r) for r in self.ledger.q(
+            "SELECT * FROM knowledge_log WHERE ts>? AND actor!=? ORDER BY id", (since, name))]
+        return (msgs, kb) if (msgs or kb) else ()
+
+    def _do_digest(self, key: str, force: bool = False, now: float | None = None):
+        p, client = self.parts[key], self.clients[key]
+        now = now or time.time()
+        pending = self._pending(key)
+        if not pending:
+            return
+        msgs, kb = pending
+        if self.ledger.paused(key):
+            return
+        if not force and self.ledger.runs_since(today_start(), key, kind="digest") >= p.digest_daily_cap:
+            return
+        if self.ledger.runs_since(today_start(), key) >= p.daily_cap \
+                or self.ledger.runs_since(now - 3600) >= self.cfg.max_replies_per_hour:
+            return
+        self.ledger.set(f"digest:{key}", now)
+        # group by thread, newest 30 messages
+        msgs = msgs[-30:]
+        threads: dict[tuple, list] = {}
+        for m in msgs:
+            threads.setdefault((m["channel"], m["thread_ts"]), []).append(m)
+        refs, sections = {}, []
+        for i, ((channel, tts), items) in enumerate(threads.items(), 1):
+            ref = f"T{i}"
+            refs[ref] = (channel, tts)
+            ctx = self._thread(client, channel, tts, tts)[-8:]
+            new_ts = {m["ts"] for m in items}
+            lines = []
+            for m in ctx:
+                mark = "NEW " if m.get("ts") in new_ts else ""
+                who = self.author(m) + (" (bot)" if self.is_bot_msg(m) else "")
+                lines.append(f"  {mark}{who}: {self.readable(m.get('text', ''))[:800]}")
+            if not ctx:  # couldn't read the thread: fall back to what we stored
+                lines = [f"  NEW {m['author']}: {self.readable(m['text'])[:800]}" for m in items]
+            sections.append(f"[{ref}] channel {channel}\n" + "\n".join(lines))
+        kb_lines = [f"- {e['actor']} {e['action']} #{e['entry']}" + (f": {e['detail'][:300]}" if e["detail"] else "")
+                    for e in kb[-30:]]
+        prompt = self.build_prompt(p, {"thread": [], "sender": "the bridge", "channel_name": "several"},
+                                   digest=("\n\n".join(sections) or "(no new messages)",
+                                           "\n".join(kb_lines) or "(none)"))
+        run_id, day_dir = self._start_run(key, prompt, "digest", "digest", "digest", "digest")
+        try:
+            res = self.runner(p, prompt, self.cfg.workdir)
+        except Exception as e:
+            self.ledger.update(run_id, ended=time.time(), status="error", error=str(e)[:500])
+            self.log(f"{p.name}: digest {run_id} failed: {e}")
+            return  # leave items unseen; try again next slot
+        (day_dir / f"{run_id}-{key}.reply.md").write_text(res.text, "utf-8")
+        self._mark_seen(key, msgs, kb)
+        body, notes = self.kb.apply(res.text, p.name, "digest")
+        posted = 0
+        for m in re.finditer(r"\[\[reply\s+thread\s*=\s*\"?(T\d+)\"?\s*\]\](.*?)\[\[/reply\]\]", body, re.S | re.I):
+            ref, text = m.group(1).upper(), m.group(2).strip()
+            if ref not in refs or not text:
+                continue
+            channel, tts = refs[ref]
+            if self._chain(self._thread(client, channel, tts, tts)) >= self.cfg.max_bot_chain:
+                self.log(f"{p.name}: digest reply skipped, loop limit in {channel}/{tts}")
+                continue
+            out = self.outgoing(p, text)
+            if not self.ledger.first_time(f"reply:{channel}:{tts}:{key}:{sha(out)}"):
+                continue
+            for chunk in split(out):
+                self._post(client, channel, tts, chunk)
+            posted += 1
+        if notes:
+            first = next(iter(refs.values()), None)
+            if first:
+                self._post(client, first[0], first[1], "\n".join(notes))
+        status = "ok" if posted or notes else "pass"
+        self.ledger.update(run_id, ended=time.time(), status=status, exit_code=res.exit_code,
+                           reply_sha256=sha(res.text), reply_path=str(day_dir / f"{run_id}-{key}.reply.md"),
+                           input_tokens=res.input_tokens, output_tokens=res.output_tokens, cost_usd=res.cost_usd)
+        self.log(f"{p.name}: digest {run_id} {status}: {len(msgs)} messages, {len(kb)} knowledge changes, "
+                 f"{posted} replies")
+
+    def _mark_seen(self, key, msgs, kb):
+        for m in msgs:
+            self.ledger.q("UPDATE inbox SET seen=1 WHERE id=?", (m["id"],))
+        if kb:
+            self.ledger.set(f"kbseen:{key}", max(e["ts"] for e in kb))
+
+    def _chain(self, thread: list[dict]) -> int:
+        n = 0
+        for m in reversed(thread):
+            if not self.is_bot_msg(m):
+                break
+            n += 1
+        return n
+
+    def _start_run(self, key, prompt, channel, thread_ts, trigger_ts, sender):
+        run_id = uuid.uuid4().hex[:12]
+        day_dir = self.cfg.data_dir / "transcripts" / dt.date.today().isoformat()
+        day_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = day_dir / f"{run_id}-{key}.prompt.md"
+        prompt_path.write_text(prompt, "utf-8")
+        self.ledger.record(id=run_id, agent=key, channel=channel, thread_ts=thread_ts, trigger_ts=trigger_ts,
+                           trigger_from=sender, started=time.time(), status="running",
+                           prompt_sha256=sha(prompt), prompt_path=str(prompt_path),
+                           command=json.dumps(self.parts[key].command))
+        return run_id, day_dir
+
+    def build_prompt(self, p: Participant, job: dict, digest: tuple | None = None) -> str:
         roster = []
         for o in self.cfg.participants:
             if o.key != p.key:
@@ -664,6 +831,24 @@ class Bridge:
         brief = f"\n\nPROJECT BRIEF (from the owner):\n{self.cfg.project_brief}" if self.cfg.project_brief else ""
         persona = f"\n{p.persona.strip()}" if p.persona.strip() else ""
         kb = self.kb.prompt_section()
+        if digest:
+            tail = f"""CATCH-UP: new activity since you last looked (you were not @mentioned in these).
+Messages marked NEW are new to you; the others are context.
+{digest[0]}
+
+KNOWLEDGE BANK CHANGES BY OTHERS:
+{digest[1]}
+
+Decide whether anything here needs you: a question you can answer, an error you can catch, a claim
+you can verify or dispute, work in your area. Most of the time the right answer is to stay quiet.
+- To reply in a thread: [[reply thread=T1]]your Slack message[[/reply]] (one block per thread).
+- Knowledge [[save]]/[[verify]]/[[dispute]] blocks also work here.
+- If nothing needs you, reply with exactly: PASS"""
+        else:
+            tail = f"""THREAD (oldest first), channel {job['channel_name']}:
+{chr(10).join(lines)}
+
+The latest message mentioning you is from {job['sender']}. Write your reply now."""
         return f"""You are {p.name}, a participant in the IM1 engineering collective, replying in a Slack thread.
 Your starting focus: {p.role}
 These are starting strengths, not limits: propose ideas, challenge decisions and contribute outside them.{persona}
@@ -696,10 +881,7 @@ Search before saving so you don't duplicate an entry.
 
 {kb}{brief}
 
-THREAD (oldest first), channel {job['channel_name']}:
-{chr(10).join(lines)}
-
-The latest message mentioning you is from {job['sender']}. Write your reply now."""
+{tail}"""
 
     def outgoing(self, p: Participant, text: str) -> str:
         """Turn @Name into real Slack mentions; drop self-mentions."""
@@ -743,10 +925,21 @@ The latest message mentioning you is from {job['sender']}. Write your reply now.
                     self.ledger.set(f"pause:{k}", False)
             self._post(client, channel, where, f"{'Paused' if cmd == 'pause' else 'Resumed'}: {target}.")
             self.log(f"owner {cmd} {target}")
+        elif cmd == "digest":
+            if target not in valid:
+                self._post(client, channel, where, f"Unknown participant `{target}`.")
+                return True
+            keys = list(self.parts) if target == "all" else [target]
+            for k in keys:
+                if self.sync:
+                    self._do_digest(k, force=True)
+                else:
+                    self.queues[k].put({"kind": "digest", "force": True})
+            self._post(client, channel, where, f"Catch-up requested for {target}.")
         elif cmd == "status":
             self._post(client, channel, where, self.status_text())
         else:
-            self._post(client, channel, where, "Commands: `!im1 status`, `!im1 pause <name|all>`, `!im1 resume <name|all>`")
+            self._post(client, channel, where, "Commands: `!im1 status`, `!im1 pause <name|all>`, `!im1 resume <name|all>`, `!im1 digest <name|all>`")
         return True
 
     def status_text(self) -> str:
@@ -762,7 +955,8 @@ The latest message mentioning you is from {job['sender']}. Write your reply now.
                               (k, t0))[0]
             state = "paused" if self.ledger.paused(k) else ("working" if self.busy.get(k) else "idle")
             q = self.queues[k].qsize() if k in self.queues else 0
-            rows.append(f"• *{p.name}*: {state}, queue {q}, today {r['n']}/{p.daily_cap} replies, "
+            unseen = self.ledger.q("SELECT COUNT(*) n FROM inbox WHERE agent=? AND seen=0", (k,))[0]["n"]
+            rows.append(f"• *{p.name}*: {state}, queue {q}, unseen updates {unseen}, today {r['n']}/{p.daily_cap} runs, "
                         f"{r['e'] or 0} errors, tokens {r['i']}/{r['o']}"
                         + (f", reported cost ${r['c']:.2f}" if r['c'] else ""))
         k = self.ledger.q("SELECT COUNT(*) n, SUM(status='verified') v, SUM(status='disputed') d FROM knowledge")[0]

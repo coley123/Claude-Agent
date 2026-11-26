@@ -21,6 +21,12 @@ another participant to hand work on. You no longer relay messages between them.
 
 - **Real-time collaboration.** Participants answer @mentions within seconds of the app finishing.
   Each one sees the whole thread and the knowledge bank on every turn.
+- **Everyone hears about updates.** A participant answers @mentions right away. Everything else
+  in the watched channels, plus every knowledge-bank change by someone else, goes into its inbox.
+  When there is something unseen, it gets a catch-up (at most once an hour by default, 12 a day):
+  the new messages with a little thread context, then it either replies in the right thread or
+  says PASS. No new activity means no run, so idle time costs nothing. Anything posted into a
+  watched channel counts, so adding Slack's GitHub app to a channel brings repo updates in too.
 - **Saved, arranged knowledge.** Any participant (or you) can save a decision, fact, hypothesis,
   link, procedure, result, problem or question. Each entry keeps its author, source thread,
   confidence, status, evidence and full revision history. Entries start *unverified*; only a
@@ -70,7 +76,8 @@ another participant to hand work on. You no longer relay messages between them.
   `[[save kind=decision title="$0 rule"]]No paid APIs without owner approval.[[/save]]`
 - Verify or dispute: `[[verify id=3]]33/33 tests passed, log at ...[[/verify]]`,
   `[[dispute id=4]]reason[[/dispute]]`
-- Controls (owner only): `!im1 status`, `!im1 pause grok`, `!im1 resume grok`, `!im1 pause all`.
+- Controls (owner only): `!im1 status`, `!im1 pause grok`, `!im1 resume grok`, `!im1 pause all`,
+  `!im1 digest grok` (catch up now) or `!im1 digest all`.
   Emergency stop: create a file named `STOP` in `bridge-data`.
 - Browse the knowledge bank: open `knowledge/INDEX.md`, or point Obsidian at the folder.
 
@@ -92,6 +99,6 @@ another participant to hand work on. You no longer relay messages between them.
 
 ## Tests
 
-`python -m pytest -q tests/test_slack_bridge.py` runs 24 offline tests with a fake Slack
+`python -m pytest -q tests/test_slack_bridge.py` runs 30 offline tests with a fake Slack
 workspace and scripted replies: mentions, hand-offs, loop limit, caps, pause/STOP, de-duplication,
-audit records, knowledge save/verify/dispute/update rules, and the command runner.
+audit records, catch-up digests, knowledge save/verify/dispute/update rules, and the command runner.

@@ -18,6 +18,16 @@ allowed_channels = [
   "C0CLLV71T1T",  # #im1-progress
   "C0CMLKBP7U0",  # #im1-results
 ]
+# Channels whose new messages each participant hears about in its catch-up digests, even when
+# not @mentioned. #im1-progress is left out on purpose: Hermes posts a heartbeat there every
+# 15 minutes, which would wake every participant all day. Per-participant `watch_channels`
+# overrides this; `watch = false` turns digests off for one participant.
+watch_channels = [
+  "C0CLQG9PTE2",  # #im1-research-hub
+  "C0CLL1MEF27",  # #im1-directives
+  "C0CMLKBC7DW",  # #im1-clarifications
+  "C0CMLKBP7U0",  # #im1-results
+]
 # Who can use !im1 pause/resume/status and save/verify knowledge directly.
 owner_ids = ["U0CMLGY2Q3A"]  # Coley
 
@@ -60,6 +70,8 @@ output = "claude-json"
 timeout_s = 600
 daily_cap = 40
 min_interval_s = 15
+digest_minutes = 60     # catch up on new activity at most hourly, only when there is some
+digest_daily_cap = 12
 
 [[participants]]
 name = "GPT"
@@ -74,6 +86,8 @@ output = "text"
 timeout_s = 600
 daily_cap = 40
 min_interval_s = 15
+digest_minutes = 60     # catch up on new activity at most hourly, only when there is some
+digest_daily_cap = 12
 
 [[participants]]
 name = "Grok"
@@ -87,3 +101,5 @@ output = "text"
 timeout_s = 600
 daily_cap = 40
 min_interval_s = 15
+digest_minutes = 60     # catch up on new activity at most hourly, only when there is some
+digest_daily_cap = 12

@@ -363,3 +363,96 @@ def test_example_config_loads():
     cfg = B.load_config(Path(__file__).resolve().parents[1] / "slack_bridge" / "bridge.example.toml")
     assert [p.name for p in cfg.participants] == ["Claude", "GPT", "Grok"]
     assert [e.name for e in cfg.externals] == ["Hermes", "Coley"]
+
+
+# ---------------------------------------------------------------- update digests
+
+def test_unmentioned_activity_reaches_everyone_in_next_digest(tmp_path):
+    seen = {}
+
+    def replies(k, p, n):
+        seen[k] = p
+        return "PASS"
+    br, ws, calls = make(tmp_path, replies)
+    root = human_says(br, ws, "New directive: freeze BoxBoard until Friday.")
+    assert calls == []  # nobody mentioned, nobody runs yet
+    br.digest_tick(now=10_000)
+    assert sorted(c[0] for c in calls) == ["claude", "gpt", "grok"]
+    assert "NEW Coley: New directive: freeze BoxBoard" in seen["grok"]
+    assert "reply with exactly: PASS" in seen["grok"]
+    assert len(ws.msgs["C1"]) == 1  # PASS posts nothing
+    statuses = {r["status"] for r in br.ledger.q("SELECT status FROM runs")}
+    assert statuses == {"pass"}
+    # nothing new -> nothing runs (idle costs nothing)
+    br.digest_tick(now=20_000)
+    assert len(calls) == 3
+
+
+def test_digest_reply_lands_in_the_right_thread(tmp_path):
+    def replies(k, p, n):
+        if k == "grok" and "CATCH-UP" in p:
+            return "[[reply thread=T1]]That claim needs a test run first. @Claude can you check?[[/reply]]"
+        if k == "claude":
+            return "Checked: 33/33 pass."
+        return "PASS"
+    br, ws, calls = make(tmp_path, replies)
+    root = human_says(br, ws, "Durable suite is green, I think.")
+    br.digest_tick(now=10_000)
+    thread = [m for m in ws.msgs["C1"] if m.get("thread_ts") == root["ts"]]
+    assert thread[0]["text"].startswith("That claim needs a test run first. <@UCLAUDE>")
+    assert thread[1]["text"] == "Checked: 33/33 pass."  # the mention woke Claude immediately
+
+
+def test_digest_respects_interval_and_daily_cap(tmp_path):
+    br, ws, calls = make(tmp_path, lambda k, p, n: "PASS")
+    br.parts["claude"].watch = br.parts["gpt"].watch = False
+    br.parts["grok"].digest_daily_cap = 2
+    for i, t in enumerate([10_000, 10_100, 20_000, 30_000]):
+        human_says(br, ws, f"update {i}")
+        br.digest_tick(now=t)
+    # 10_100 is inside the 60-minute window; 30_000 is over the daily cap of 2
+    assert [c[0] for c in calls] == ["grok", "grok"]
+
+
+def test_knowledge_changes_trigger_digest_for_others(tmp_path):
+    def replies(k, p, n):
+        if n == 1:
+            return '[[save kind=decision title="Use SQLite first"]]baseline before Hindsight[[/save]]'
+        return "PASS"
+    br, ws, calls = make(tmp_path, replies)
+    br.parts["claude"].watch = False
+    human_says(br, ws, "<@UCLAUDE> record the memory decision")
+    ws.msgs["C1"].clear()
+    br.ledger.q("UPDATE inbox SET seen=1")  # only the knowledge change is new
+    br.digest_tick(now=10_000)
+    digest_prompts = [p for k, p in calls[1:]]
+    assert len(digest_prompts) == 2
+    assert all("Claude save #1" in p for p in digest_prompts)
+
+
+def test_digest_skips_paused_and_unwatched_channels(tmp_path):
+    br, ws, calls = make(tmp_path, lambda k, p, n: "PASS", watch_channels='["C9"]')
+    human_says(br, ws, "chatter in C1")
+    br.digest_tick(now=10_000)
+    assert calls == []
+    human_says(br, ws, "!im1 pause all", channel="C9")
+    human_says(br, ws, "important in C9", channel="C9")
+    br.digest_tick(now=20_000)
+    assert calls == []
+
+
+def test_owner_can_force_a_digest(tmp_path):
+    br, ws, calls = make(tmp_path, lambda k, p, n: "PASS")
+    human_says(br, ws, "something happened")
+    br.digest_tick(now=time_now())
+    n = len(calls)
+    human_says(br, ws, "something else")
+    human_says(br, ws, "!im1 digest gpt")
+    assert len(calls) == n + 1 and calls[-1][0] == "gpt"
+    human_says(br, ws, "!im1 status")
+    assert "unseen updates" in ws.msgs["C1"][-1]["text"]
+
+
+def time_now():
+    import time
+    return time.time()
