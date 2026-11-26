@@ -1,0 +1,89 @@
+# IM1 Slack bridge settings. Copy to bridge.toml and adjust paths.
+# Slack tokens are NOT stored here: they come from environment variables (see .env.example).
+
+[bridge]
+# Where the audit log, ledger and transcripts go.
+data_dir = "C:/Users/coley/IM1/collab/bridge-data"
+# The folder the agents' apps run in. They can read files here (not write, by default).
+workdir = "C:/Users/coley/IM1"
+# Shared knowledge bank (markdown mirror). Keep it inside workdir so every agent can open
+# the files, and point Obsidian at it if you like.
+knowledge_dir = "C:/Users/coley/IM1/collab/knowledge"
+
+# Channels where the bots answer. Empty list = any channel they're invited to (plus DMs).
+allowed_channels = [
+  "C0CLQG9PTE2",  # #im1-research-hub
+  "C0CLL1MEF27",  # #im1-directives
+  "C0CMLKBC7DW",  # #im1-clarifications
+  "C0CLLV71T1T",  # #im1-progress
+  "C0CMLKBP7U0",  # #im1-results
+]
+# Who can use !im1 pause/resume/status and save/verify knowledge directly.
+owner_ids = ["U0CMLGY2Q3A"]  # Coley
+
+max_bot_chain = 6          # bot replies in a row in one thread before bots wait for a person
+max_replies_per_hour = 40  # across all bridged participants
+context_messages = 40      # thread messages included in each prompt
+
+# Optional: a standing brief every participant sees (charter, current directive, rules).
+# project_brief_file = "C:/Users/coley/IM1/collab/BRIEF.md"
+project_brief = """
+IM1 is building a persistent collective runtime: private and shared memory, peer messaging,
+task delegation, verified tools and skill reuse. Owner rules: $0 incremental spend, no paid
+APIs, no new behavioral studies or fine-tunes unless the owner approves, preserve original
+evidence, label scripted results separately from real-model results.
+"""
+
+# Participants that are NOT run by this bridge but should be known to the others.
+[[external]]
+name = "Hermes"
+user_id = "U0CLU4RPAGH"   # IM1 Bot (Hermes gateway)
+role = "Local execution, infrastructure, tools and operations on the owner's Windows machine."
+
+[[external]]
+name = "Coley"
+user_id = "U0CMLGY2Q3A"
+role = "Owner. Final authority on scope, spending and approvals."
+human = true
+
+# Participants run by this bridge. Each needs its own Slack app (see manifests/).
+[[participants]]
+name = "Claude"
+role = "Software engineering, implementation, architectural analysis and debugging."
+bot_token_env = "CLAUDE_SLACK_BOT_TOKEN"
+app_token_env = "CLAUDE_SLACK_APP_TOKEN"
+# Claude Code, signed in with your Claude account (run `claude` once to sign in).
+# Headless mode can read files but asks permission for edits, so it can't change files here.
+command = ["claude", "-p", "--output-format", "json"]
+input = "stdin"
+output = "claude-json"
+timeout_s = 600
+daily_cap = 40
+min_interval_s = 15
+
+[[participants]]
+name = "GPT"
+role = "Research, architectural direction, technical direction and independent evaluation."
+bot_token_env = "GPT_SLACK_BOT_TOKEN"
+app_token_env = "GPT_SLACK_APP_TOKEN"
+# Codex CLI, signed in with your ChatGPT account (`codex login`). Read-only sandbox.
+command = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only",
+           "--output-last-message", "{out_file}", "-"]
+input = "stdin"
+output = "text"
+timeout_s = 600
+daily_cap = 40
+min_interval_s = 15
+
+[[participants]]
+name = "Grok"
+role = "Independent research, critical evaluation, alternative approaches and adversarial review."
+bot_token_env = "GROK_SLACK_BOT_TOKEN"
+app_token_env = "GROK_SLACK_APP_TOKEN"
+# Grok Build, signed in with your xAI account (`grok login`). The prompt goes in as an argument.
+command = ["grok", "--no-auto-update", "--output-format", "plain", "-p", "{prompt}"]
+input = "arg"
+output = "text"
+timeout_s = 600
+daily_cap = 40
+min_interval_s = 15

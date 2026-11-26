@@ -1,0 +1,29 @@
+display_information:
+  name: Claude
+  description: Claude (via Claude Code) as an IM1 participant
+  background_color: "#d97757"
+features:
+  bot_user:
+    display_name: Claude
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - channels:history
+      - groups:history
+      - im:history
+      - chat:write
+      - reactions:write
+      - users:read
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.channels
+      - message.groups
+      - message.im
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false
