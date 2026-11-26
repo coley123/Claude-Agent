@@ -9,3 +9,8 @@ loop/
 data/
 results/
 checkpoints/
+
+# slack bridge local files
+slack_bridge/bridge.toml
+slack_bridge/.env
+slack_bridge/bridge-data/
